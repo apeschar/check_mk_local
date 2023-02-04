@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 
+from datetime import datetime
+import sys
 import json
 import subprocess
 from argparse import ArgumentParser
 
 
 def main(args):
+    if args.current_user:
+        print(json.dumps(get_current_user_units()))
+        return 0
+
     for user in get_users():
         if not user_may_linger(user):
             continue
         for unit in get_user_units(user):
             if not unit["unit"].endswith(".service"):
                 continue
-            if "/.config/systemd/user/" not in get_user_unit_prop(
-                user, unit["unit"], "FragmentPath"
-            ):
+            if "/.config/systemd/user/" not in unit["fragment_path"]:
                 continue
             print(
                 get_state(unit["active"]),
@@ -24,9 +28,15 @@ def main(args):
                 % (
                     unit["unit"],
                     unit["active"],
-                    get_user_unit_prop(user, unit["unit"], "StateChangeTimestamp"),
+                    format_timestamp(unit["state_change_timestamp"]),
                 ),
             )
+
+    return 0
+
+
+def format_timestamp(timestamp):
+    return datetime.fromtimestamp(timestamp / 1e6).isoformat()
 
 
 def get_state(active_state):
@@ -56,11 +66,30 @@ def user_may_linger(user):
 
 
 def get_user_units(user):
-    return json.loads(
-        run_as_user(
-            user, ["systemctl", "--user", "list-units", "--output", "json", "--all"]
+    return json.loads(run_as_user(user, [sys.executable, __file__, '--current-user']))
+
+
+def get_current_user_units():
+    import dbus
+
+    bus = dbus.SessionBus()
+    systemd = bus.get_object('org.freedesktop.systemd1', '/org/freedesktop/systemd1')
+    manager = dbus.Interface(systemd, 'org.freedesktop.systemd1.Manager')
+
+    result = []
+    for unit_name, _description, _load_state, active_state, _sub_state, _, obj_path, *_ in manager.ListUnits():
+        props = dbus.Interface(
+            bus.get_object('org.freedesktop.systemd1', obj_path),
+            'org.freedesktop.DBus.Properties',
         )
-    )
+        result.append({
+            'unit': unit_name,
+            'active': active_state,
+            'fragment_path': props.Get('org.freedesktop.systemd1.Unit', 'FragmentPath'),
+            'state_change_timestamp': props.Get('org.freedesktop.systemd1.Unit', 'StateChangeTimestamp'),
+        })
+
+    return result
 
 
 def run_as_user(user, cmd):
@@ -83,13 +112,8 @@ def get_user_prop(user, prop):
     ).strip()
 
 
-def get_user_unit_prop(user, unit, prop):
-    return run_as_user(
-        user, ["systemctl", "--user", "show", "--value", "-p", prop, "--", unit]
-    ).strip()
-
-
 parser = ArgumentParser()
+parser.add_argument('--current-user', action='store_true')
 
 if __name__ == "__main__":
-    main(parser.parse_args())
+    sys.exit(main(parser.parse_args()))
